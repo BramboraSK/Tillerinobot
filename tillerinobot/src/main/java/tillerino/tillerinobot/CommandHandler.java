@@ -1,5 +1,7 @@
 package tillerino.tillerinobot;
 
+import static org.apache.commons.lang3.StringUtils.getLevenshteinDistance;
+
 import java.io.IOException;
 import java.sql.SQLException;
 import java.util.ArrayList;
@@ -8,16 +10,14 @@ import java.util.List;
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 
-import lombok.EqualsAndHashCode;
-import lombok.ToString;
-import lombok.Value;
-
 import org.apache.commons.lang3.StringUtils;
 import org.tillerino.osuApiModel.OsuApiUser;
 
+import lombok.EqualsAndHashCode;
+import lombok.ToString;
+import lombok.Value;
 import tillerino.tillerinobot.UserDataManager.UserData;
-
-import static org.apache.commons.lang3.StringUtils.getLevenshteinDistance;
+import tillerino.tillerinobot.data.util.ThreadLocalAutoCommittingEntityManager;
 
 public interface CommandHandler {
 	/**
@@ -27,12 +27,12 @@ public interface CommandHandler {
 		/**
 		 * Adds another response to the current one.
 		 */
-		default Response then(Response nextResponse) {
+		default Response then(@CheckForNull Response nextResponse) {
 			ResponseList list = new ResponseList();
 			if (this instanceof NoResponse) {
 				return nextResponse;
 			}
-			if (nextResponse instanceof NoResponse) {
+			if (nextResponse instanceof NoResponse || nextResponse == null) {
 				return this;
 			}
 			if (this instanceof ResponseList) {
@@ -49,15 +49,36 @@ public interface CommandHandler {
 		}
 
 		/**
-		 * Executes a task after this response
+		 * Executes a task after this response.
 		 */
 		default Response thenRun(Task task) {
 			return then(task);
 		}
 
+		/**
+		 * Submits a task to the maintenance executor service after this response
+		 * was handled.
+		 */
 		default Response thenRunAsync(AsyncTask task) {
 			return then(task);
 		}
+
+		/**
+		 * Chains this response with a clean up task. A clean up task will run
+		 * even if one of the previous responses caused an exception.
+		 */
+		default Response thenCleanUp(CleanUpTask task) {
+			return then(task);
+		}
+
+		static NoResponse none() {
+			return new NoResponse();
+		}
+
+		/**
+		 * @return true, this response or a child response sends something through IRC
+		 */
+		boolean sends();
 	}
 
 	/**
@@ -67,6 +88,11 @@ public interface CommandHandler {
 	@Value
 	public static class Message implements Response {
 		String content;
+
+		@Override
+		public boolean sends() {
+			return true;
+		}
 	}
 
 	/**
@@ -76,6 +102,11 @@ public interface CommandHandler {
 	@Value
 	public static class Success implements Response {
 		String content;
+
+		@Override
+		public boolean sends() {
+			return true;
+		}
 	}
 
 	/**
@@ -84,6 +115,11 @@ public interface CommandHandler {
 	@Value
 	public static class Action implements Response {
 		String content;
+
+		@Override
+		public boolean sends() {
+			return true;
+		}
 	}
 
 	/**
@@ -96,20 +132,66 @@ public interface CommandHandler {
 		public String toString() {
 			return "[No Response]";
 		}
+
+		@Override
+		public boolean sends() {
+			return false;
+		}
 	}
 
 	@EqualsAndHashCode
 	@ToString
 	public static final class ResponseList implements Response {
 		List<Response> responses = new ArrayList<>();
+
+		@Override
+		public boolean sends() {
+			for (Response response : responses) {
+				if (response.sends()) {
+					return true;
+				}
+			}
+			return false;
+		}
 	}
 
 	interface Task extends Response {
+		/**
+		 * Will not have an entity manager set in
+		 * {@link ThreadLocalAutoCommittingEntityManager}
+		 */
 		void run();
+
+		@Override
+		default boolean sends() {
+			return false;
+		}
 	}
 
 	interface AsyncTask extends Response {
+		/**
+		 * Will have an entity manager set in
+		 * {@link ThreadLocalAutoCommittingEntityManager}
+		 */
 		void run();
+
+		@Override
+		default boolean sends() {
+			return false;
+		}
+	}
+
+	interface CleanUpTask extends Response {
+		/**
+		 * Will not have an entity manager set in
+		 * {@link ThreadLocalAutoCommittingEntityManager}
+		 */
+		void run();
+
+		@Override
+		default boolean sends() {
+			return false;
+		}
 	}
 
 	/**

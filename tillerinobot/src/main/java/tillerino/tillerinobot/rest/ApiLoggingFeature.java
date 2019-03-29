@@ -17,8 +17,8 @@ import org.slf4j.MDC;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import tillerino.tillerinobot.IRCBot;
 import tillerino.tillerinobot.RateLimiter;
+import tillerino.tillerinobot.ResponseQueue;
 
 /**
  * General logging for API. Also sets/logs rate limiter options.
@@ -58,7 +58,7 @@ public class ApiLoggingFeature implements Feature {
 		@Override
 		public void filter(ContainerRequestContext requestContext, ContainerResponseContext responseContext) {
 			rateLimiter.clearThreadPriority();
-			MDC.put(IRCBot.MCD_OSU_API_RATE_BLOCKED_TIME, String.valueOf(rateLimiter.blockedTime()));
+			MDC.put(ResponseQueue.MCD_OSU_API_RATE_BLOCKED_TIME, String.valueOf(rateLimiter.blockedTime()));
 			MDC.put("apiStatus", String.valueOf(responseContext.getStatus()));
 			log.debug("API call finished");
 			MDC.clear();

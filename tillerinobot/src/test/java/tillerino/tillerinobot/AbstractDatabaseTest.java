@@ -18,16 +18,18 @@ import tillerino.tillerinobot.data.repos.UserNameMappingRepository;
 import tillerino.tillerinobot.data.util.RepositoryModule;
 import tillerino.tillerinobot.data.util.ThreadLocalAutoCommittingEntityManager;
 
+import com.google.inject.AbstractModule;
 import com.google.inject.Guice;
 import com.google.inject.Injector;
 import com.google.inject.Provides;
 
 public abstract class AbstractDatabaseTest {
-	public static class CreateInMemoryDatabaseModule extends RepositoryModule {
+	public static class CreateInMemoryDatabaseModule extends AbstractModule {
 		@Provides
 		public EntityManagerFactory newEntityManagerFactory() {
 			HibernateJpaVendorAdapter vendorAdapter = new HibernateJpaVendorAdapter();
 			vendorAdapter.setGenerateDdl(true);
+			vendorAdapter.setShowSql(true);
 
 			LocalContainerEntityManagerFactoryBean factory = new LocalContainerEntityManagerFactoryBean();
 			factory.setJpaVendorAdapter(vendorAdapter);
@@ -36,6 +38,11 @@ public abstract class AbstractDatabaseTest {
 			factory.afterPropertiesSet();
 
 			return factory.getObject();
+		}
+
+		@Override
+		protected void configure() {
+			
 		}
 	}
 	protected static Injector injector;
@@ -51,8 +58,13 @@ public abstract class AbstractDatabaseTest {
 	
 	@BeforeClass
 	public static void injectAll() {
-		injector = Guice.createInjector(new CreateInMemoryDatabaseModule());
-        
+		injector = Guice.createInjector(new CreateInMemoryDatabaseModule() {
+			@Override
+			protected void configure() {
+				install(new RepositoryModule());
+			}
+		});
+
 		emf = injector.getInstance(EntityManagerFactory.class);
 		
 		em = injector.getInstance(ThreadLocalAutoCommittingEntityManager.class);

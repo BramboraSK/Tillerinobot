@@ -1,5 +1,7 @@
 package tillerino.tillerinobot.rest;
 
+import java.util.concurrent.atomic.AtomicInteger;
+
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import javax.ws.rs.NotFoundException;
@@ -30,6 +32,23 @@ public class BotInfoService implements BotStatus {
 		private long lastReceivedMessage;
 		private long lastSentMessage;
 		private long lastRecommendation;
+		private final AtomicInteger responseQueueSize = new AtomicInteger(0);
+
+		public void incrementQueueSize() {
+			responseQueueSize.incrementAndGet();
+		}
+
+		public void decrementQueueSize() {
+			responseQueueSize.decrementAndGet();
+		}
+
+		public int getResponseQueueSize() {
+			return responseQueueSize.get();
+		}
+
+		public void setResponseQueueSize(int size) {
+			responseQueueSize.set(size);
+		}
 	}
 
 	private final BotInfo botInfo;

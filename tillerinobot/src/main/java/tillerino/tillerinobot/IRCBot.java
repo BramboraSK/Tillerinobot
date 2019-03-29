@@ -6,7 +6,6 @@ import java.net.SocketTimeoutException;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Objects;
 import java.util.Random;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -22,11 +21,11 @@ import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import javax.inject.Inject;
 import javax.inject.Named;
+import javax.persistence.EntityManager;
 import javax.persistence.EntityManagerFactory;
 import javax.ws.rs.ServiceUnavailableException;
 import javax.ws.rs.WebApplicationException;
 
-import org.pircbotx.PircBotX;
 import org.pircbotx.User;
 import org.pircbotx.hooks.CoreHooks;
 import org.pircbotx.hooks.Event;
@@ -48,17 +47,12 @@ import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
 import com.google.common.collect.ImmutableList;
 
-import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import lombok.extern.slf4j.Slf4j;
 import tillerino.tillerinobot.BotBackend.IRCName;
 import tillerino.tillerinobot.BotRunnerImpl.CloseableBot;
-import tillerino.tillerinobot.CommandHandler.Action;
-import tillerino.tillerinobot.CommandHandler.AsyncTask;
 import tillerino.tillerinobot.CommandHandler.Message;
 import tillerino.tillerinobot.CommandHandler.Response;
-import tillerino.tillerinobot.CommandHandler.ResponseList;
-import tillerino.tillerinobot.CommandHandler.Success;
-import tillerino.tillerinobot.CommandHandler.Task;
+import tillerino.tillerinobot.ResponseQueue.IRCBotUser;
 import tillerino.tillerinobot.UserDataManager.UserData;
 import tillerino.tillerinobot.UserException.QuietException;
 import tillerino.tillerinobot.data.util.ThreadLocalAutoCommittingEntityManager;
@@ -89,33 +83,9 @@ import tillerino.tillerinobot.websocket.LiveActivityEndpoint;
 public class IRCBot extends CoreHooks {
 	private static final String MDC_EVENT = "event";
 
-	interface IRCBotUser {
-		/**
-		 * @return the user's IRC nick, not their actual user name.
-		 */
-		@IRCName String getNick();
-		/**
-		 * 
-		 * @param msg
-		 * @param success see {@link Success}
-		 * @return true if the message was sent
-		 */
-		boolean message(String msg, boolean success);
-		
-		/**
-		 * 
-		 * @param msg
-		 * @return true if the action was sent
-		 */
-		boolean action(String msg);
-	}
-
 	public static final String MDC_HANDLER = "handler";
 	public static final String MDC_STATE = "state";
-	public static final String MDC_SUCCESS = "success";
-	public static final String MDC_DURATION = "duration";
-	public static final String MCD_OSU_API_RATE_BLOCKED_TIME = "osuApiRateBlockedTime";
-	
+
 	private final BotBackend backend;
 	private final boolean silent;
 	private final BotInfo botInfo;
@@ -127,6 +97,7 @@ public class IRCBot extends CoreHooks {
 	private final OsutrackDownloader osutrackDownloader;
 	private final RateLimiter rateLimiter;
 	private final LiveActivityEndpoint liveActivity;
+	private final ResponseQueue queue;
 	
 	@Inject
 	public IRCBot(BotBackend backend, RecommendationsManager manager,
@@ -135,7 +106,8 @@ public class IRCBot extends CoreHooks {
 			ThreadLocalAutoCommittingEntityManager em,
 			EntityManagerFactory emf, IrcNameResolver resolver, OsutrackDownloader osutrackDownloader,
 			@Named("tillerinobot.maintenance") ExecutorService exec, RateLimiter rateLimiter,
-			LiveActivityEndpoint liveActivity) {
+			LiveActivityEndpoint liveActivity,
+			ResponseQueue queue) {
 		this.backend = backend;
 		this.botInfo = botInfo;
 		this.userDataManager = userDataManager;
@@ -148,6 +120,7 @@ public class IRCBot extends CoreHooks {
 		this.exec = exec;
 		this.rateLimiter = rateLimiter;
 		this.liveActivity = liveActivity;
+		this.queue = queue;
 		
 		commandHandlers.add(new ResetHandler(manager));
 		commandHandlers.add(new OptionsHandler(new RecommendationRequestParser(backend)));
@@ -165,6 +138,7 @@ public class IRCBot extends CoreHooks {
 	public void onConnect(ConnectEvent event) throws Exception {
 		botInfo.setRunningSince(System.currentTimeMillis());
 		log.info("connected");
+		queue.setBot((CloseableBot) event.getBot());
 	}
 	
 	@Override
@@ -174,7 +148,7 @@ public class IRCBot extends CoreHooks {
 		rateLimiter.setThreadPriority(RateLimiter.REQUEST);
 		
 		if (event.getChannel() == null || event.getUser().getNick().equals("Tillerino")) {
-			processPrivateAction(fromIRC(event.getUser(), event), event.getMessage());
+			processPrivateAction(ResponseQueue.hideEvent(event), event.getMessage());
 		}
 	}
 	
@@ -208,63 +182,74 @@ public class IRCBot extends CoreHooks {
 			return true;
 		}
 		
-		public long getLastAcquired() {
+		public synchronized long getLastAcquired() {
 			return lastAcquired;
 		}
 		
-		public Thread getLastAcquiredThread() {
+		public synchronized Thread getLastAcquiredThread() {
 			return lastAcquiredThread;
 		}
 
-		public void release() {
+		public synchronized void release() {
 			semaphore.release();
 		}
 		
-		public int getAttemptsSinceLastAcquired() {
+		public synchronized int getAttemptsSinceLastAcquired() {
 			return ++attemptsSinceLastAcquired;
 		}
 		
-		public boolean isSentWarning() {
+		public synchronized boolean isSentWarning() {
 			if(!sentWarning) {
 				sentWarning = true;
 				return false;
 			}
 			return true;
 		}
+
+		public synchronized boolean isAcquiredByMe() {
+			return semaphore.availablePermits() == 0 && lastAcquiredThread == Thread.currentThread();
+		}
+
+		public synchronized void clearLastAcquiredThread() {
+			lastAcquiredThread = null;
+		}
 	}
 
 	/**
 	 * additional locks to avoid users causing congestion in the fair locks by queuing commands in multiple threads
 	 */
-	LoadingCache<String, TimingSemaphore> perUserLock = CacheBuilder.newBuilder().expireAfterAccess(1, TimeUnit.MINUTES).build(new CacheLoader<String, TimingSemaphore>() {
-		@Override
-		public TimingSemaphore load(String arg0) throws Exception {
-			return new TimingSemaphore(1, false);
-		}
-	});
-	
-	void handleSemaphoreInUse(String purpose, TimingSemaphore semaphore, IRCBotUser user) {
+	protected final LoadingCache<String, TimingSemaphore> perUserLock = CacheBuilder.newBuilder()
+			.expireAfterAccess(1, TimeUnit.HOURS).build(CacheLoader.from(() -> new TimingSemaphore(1, false)));
+
+	private void handleSemaphoreInUse(String purpose, TimingSemaphore semaphore, IRCBotUser user) {
 		double processing = (System.currentTimeMillis() - semaphore.getLastAcquired()) / 1000d;
+		Thread thread = semaphore.getLastAcquiredThread();
 		if(processing > 5) {
-			StackTraceElement[] stackTrace = semaphore.getLastAcquiredThread().getStackTrace();
-			stackTrace = Stream.of(stackTrace)
-					.filter(elem -> elem.getClassName().contains("tillerino"))
-					.toArray(StackTraceElement[]::new);
-			Throwable t = new Throwable("Processing thread's stack trace");
-			t.setStackTrace(stackTrace);
-			log.warn(purpose + " - request has been processing for " + processing, t);
-			if(!semaphore.isSentWarning()) {
-				user.message("Just a second...", false);
+			if (thread != null) {
+				StackTraceElement[] stackTrace = thread.getStackTrace();
+				stackTrace = Stream.of(stackTrace)
+						.filter(elem -> elem.getClassName().contains("tillerino"))
+						.toArray(StackTraceElement[]::new);
+				Throwable t = new Throwable("Processing thread's stack trace");
+				t.setStackTrace(stackTrace);
+				log.warn(purpose + " - request has been processing for " + processing, t);
+			} else {
+				log.warn("{} - request has been processing for {}. Currently in response queue. Queue size: {}",
+						purpose, processing, botInfo.getResponseQueueSize());
+			}
+			if(!semaphore.isSentWarning() && thread != null) {
+				sendResponse(new Message("Just a second..."), user);
 			}
 		} else {
 			log.debug(purpose);
 		}
-		if(semaphore.getAttemptsSinceLastAcquired() >= 3 && !semaphore.isSentWarning()) {
-			user.message("[http://i.imgur.com/Ykfua8r.png ...]", false);
+		// only send if thread is not null, i.e. message is not in queue
+		if(semaphore.getAttemptsSinceLastAcquired() >= 3 && !semaphore.isSentWarning() && thread != null) {
+			sendResponse(new Message("[http://i.imgur.com/Ykfua8r.png ...]"), user);
 		}
 	}
 
-	void processPrivateAction(IRCBotUser user, String message) {
+	private void processPrivateAction(IRCBotUser user, String message) {
 		MDC.put(MDC_STATE, "action");
 		log.debug("action: " + message);
 		botInfo.setLastReceivedMessage(System.currentTimeMillis());
@@ -277,18 +262,17 @@ public class IRCBot extends CoreHooks {
 		}
 
 		Language lang = new Default();
+		Response versionInfo = Response.none();
 		try {
-			OsuApiUser apiUser = getUserOrThrow(user);
+			OsuApiUser apiUser = getUserOrThrow(user.getNick());
 			UserData userData = userDataManager.getData(apiUser.getUserId());
 			lang = userData.getLanguage();
 			
-			checkVersionInfo(user);
+			versionInfo = checkVersionInfo(user);
 
-			sendResponse(new NPHandler(backend, liveActivity).handle(message, apiUser, userData), user);
+			sendResponse(versionInfo.then(new NPHandler(backend, liveActivity).handle(message, apiUser, userData)), user);
 		} catch (RuntimeException | Error | UserException | IOException | SQLException | InterruptedException e) {
-			handleException(user, e, lang);
-		} finally {
-			semaphore.release();
+			sendResponse(versionInfo.then(handleException(user, e, lang)), user);
 		}
 	}
 
@@ -300,38 +284,40 @@ public class IRCBot extends CoreHooks {
 		return Long.parseLong(asString);
 	}
 
-	private void handleException(IRCBotUser user, Throwable e, Language lang) {
+	private Response handleException(IRCBotUser user, Throwable e, Language lang) {
 		try {
-			MDC.remove(MDC_SUCCESS);
+			MDC.remove(ResponseQueue.MDC_SUCCESS);
 			if(e instanceof ExecutionException) {
 				e = e.getCause();
 			}
 			if(e instanceof InterruptedException) {
-				return;
+				return Response.none();
 			}
 			if(e instanceof UserException) {
 				if(e instanceof QuietException) {
-					return;
+					return Response.none();
 				}
-				user.message(e.getMessage(), false);
+				return new Message(e.getMessage());
 			} else {
 				if (e instanceof ServiceUnavailableException) {
 					// We're shutting down. Nothing to do here.
+					return Response.none();
 				} else if (isTimeout(e)) {
-					user.message(lang.apiTimeoutException(), false);
 					log.debug("osu api timeout");
+					return new Message(lang.apiTimeoutException());
 				} else {
 					String string = logException(e, log);
 	
 					if ((e instanceof IOException) || isExternalException(e)) {
-						user.message(lang.externalException(string), false);
+						return new Message(lang.externalException(string));
 					} else {
-						user.message(lang.internalException(string), false);
+						return new Message(lang.internalException(string));
 					}
 				}
 			}
 		} catch (Throwable e1) {
 			log.error("holy balls", e1);
+			return Response.none();
 		}
 	}
 
@@ -378,7 +364,7 @@ public class IRCBot extends CoreHooks {
 			return;
 		rateLimiter.setThreadPriority(RateLimiter.REQUEST);
 		
-		processPrivateMessage(fromIRC(event.getUser(), event), event.getMessage());
+		processPrivateMessage(ResponseQueue.hideEvent(event), event.getMessage());
 	}
 
 	@Override
@@ -386,113 +372,30 @@ public class IRCBot extends CoreHooks {
 		botInfo.setLastReceivedMessage(System.currentTimeMillis());
 	}
 	
-	Semaphore senderSemaphore = new Semaphore(1, true);
-	
 	final Pinger pinger;
-	
-	IRCBotUser fromIRC(final User user, final Event<PircBotX> event) {
-		return new IRCBotUser() {
-			
-			@Override
-			public boolean message(String msg, boolean success) {
-				try {
-					senderSemaphore.acquire();
-				} catch (InterruptedException e) {
-					Thread.currentThread().interrupt();
-					return false;
-				}
-				try {
-					pinger.ping((CloseableBot) user.getBot());
-					
-					user.send().message(msg);
-					liveActivity.propagateSentMessage(getNick(), getEventId());
-					MDC.put(MDC_STATE, "sent");
-					if (success) {
-						MDC.put(MDC_DURATION, System.currentTimeMillis() - event.getTimestamp() + "");
-						MDC.put(MDC_SUCCESS, "true");
-						MDC.put(MCD_OSU_API_RATE_BLOCKED_TIME, String.valueOf(rateLimiter.blockedTime()));
-						if (Objects.equals(MDC.get(MDC_HANDLER), RecommendHandler.MDC_FLAG)) {
-							botInfo.setLastRecommendation(System.currentTimeMillis());
-						}
-					}
-					log.debug("sent: " + msg);
-					botInfo.setLastSentMessage(System.currentTimeMillis());
-					return true;
-				} catch (IOException | InterruptedException e) {
-					log.error("not sent: " + e.getMessage());
-					return false;
-				} finally {
-					MDC.remove(MDC_DURATION);
-					MDC.remove(MDC_SUCCESS);
-					MDC.remove(MCD_OSU_API_RATE_BLOCKED_TIME);
-					senderSemaphore.release();
-				}
-			}
-			
-			@Override
-			public boolean action(String msg) {
-				try {
-					senderSemaphore.acquire();
-				} catch (InterruptedException e) {
-					Thread.currentThread().interrupt();
-					return false;
-				}
-				try {
-					pinger.ping((CloseableBot) user.getBot());
-					
-					user.send().action(msg);
-					liveActivity.propagateSentMessage(getNick(), getEventId());
-					MDC.put(MDC_STATE, "sent");
-					log.debug("sent action: " + msg);
-					return true;
-				} catch (IOException | InterruptedException e) {
-					log.error("action not sent: " + e.getMessage());
-					return false;
-				} finally {
-					senderSemaphore.release();
-				}
-			}
-			
-			@Override
-			@IRCName
-			@SuppressFBWarnings(value = "TQ", justification = "producer")
-			public String getNick() {
-				return user.getNick();
-			}
-		};
-	}
-	
+
+	/**
+	 * Queues a response and ensures that the semaphore is released if it is
+	 * held by the current thread.
+	 */
 	void sendResponse(@Nullable Response response, IRCBotUser user) {
-		if (response instanceof ResponseList) {
-			for (Response r : ((ResponseList) response).responses) {
-				sendResponse(r, user);
+		TimingSemaphore semaphore = perUserLock.getUnchecked(user.getNick());
+		if (semaphore.isAcquiredByMe()) {
+			semaphore.clearLastAcquiredThread();
+			if (response != null && response.sends()) {
+				response = response.thenCleanUp(() -> {
+					semaphore.release();
+				});
+			} else {
+				semaphore.release();;
 			}
 		}
-		if (response instanceof Message) {
-			user.message(((Message) response).getContent(), false);
-		} 
-		if (response instanceof Success) {
-			user.message(((Success) response).getContent(), true);
-		} 
-		if (response instanceof Action) {
-			user.action(((Action) response).getContent());
-		} 
-		if (response instanceof Task) {
-			((Task) response).run();
-		}
-		if (response instanceof AsyncTask) {
-			exec.submit(() -> {
-				em.setThreadLocalEntityManager(emf.createEntityManager());
-				try {
-					((AsyncTask) response).run();
-				} finally {
-					em.close();
-				}
-			});
+		if (response != null) {
+			queue.queueResponse(response, user);
 		}
 	}
-	
-	boolean tryHandleAndRespond(CommandHandler handler, String originalMessage,
+
+	private boolean tryHandleAndRespond(CommandHandler handler, String originalMessage,
 			OsuApiUser apiUser, UserData userData, IRCBotUser user)
 			throws UserException, IOException, SQLException,
 			InterruptedException {
@@ -504,7 +407,7 @@ public class IRCBot extends CoreHooks {
 		return true;
 	}
 	
-	void processPrivateMessage(final IRCBotUser user, String originalMessage) {
+	private void processPrivateMessage(final IRCBotUser user, String originalMessage) {
 		MDC.put(MDC_STATE, "msg");
 		log.debug("received: " + originalMessage);
 		botInfo.setLastReceivedMessage(System.currentTimeMillis());
@@ -517,11 +420,12 @@ public class IRCBot extends CoreHooks {
 		}
 
 		Language lang = new Default();
+		Response versionInfo = Response.none();
 		try {
 			if (tryHandleAndRespond(new FixIDHandler(resolver), originalMessage, null, null, user)) {
 				return;
 			}
-			OsuApiUser apiUser = getUserOrThrow(user);
+			OsuApiUser apiUser = getUserOrThrow(user.getNick());
 			UserData userData = userDataManager.getData(apiUser.getUserId());
 			lang = userData.getLanguage();
 			
@@ -536,16 +440,17 @@ public class IRCBot extends CoreHooks {
 				return;
 			}
 			if (!originalMessage.startsWith("!")) {
+				semaphore.release();
 				return;
 			}
 			originalMessage = originalMessage.substring(1).trim();
 
-			checkVersionInfo(user);
+			versionInfo = checkVersionInfo(user);
 			
 			Response response = null;
 			for (CommandHandler handler : commandHandlers) {
 				if ((response = handler.handle(originalMessage, apiUser, userData)) != null) {
-					sendResponse(response, user);
+					sendResponse(versionInfo.then(response), user);
 					break;
 				}
 				MDC.remove(MDC_HANDLER);
@@ -554,17 +459,17 @@ public class IRCBot extends CoreHooks {
 				throw new UserException(lang.unknownCommand(originalMessage));
 			}
 		} catch (RuntimeException | Error | UserException | IOException | SQLException | InterruptedException e) {
-			handleException(user, e, lang);
-		} finally {
-			semaphore.release();
+			sendResponse(versionInfo.then(handleException(user, e, lang)), user);
 		}
 	}
 
-	private void checkVersionInfo(final IRCBotUser user) throws SQLException, UserException {
+	private Response checkVersionInfo(final IRCBotUser user) throws SQLException, UserException {
 		int userVersion = backend.getLastVisitedVersion(user.getNick());
-		if (userVersion < CURRENT_VERSION && (VERSION_MESSAGE == null || user.message(VERSION_MESSAGE, false))) {
+		if(userVersion < CURRENT_VERSION) {
 			backend.setLastVisitedVersion(user.getNick(), CURRENT_VERSION);
+			return new Message(VERSION_MESSAGE);
 		}
+		return Response.none();
 	}
 	
 	@Override
@@ -578,7 +483,7 @@ public class IRCBot extends CoreHooks {
 	public void onEvent(Event event) throws Exception {
 		botInfo.setLastInteraction(System.currentTimeMillis());
 		MDC.put(MDC_EVENT, "" + lastSerial.incrementAndGet());
-		em.setThreadLocalEntityManager(emf.createEntityManager());
+		EntityManager oldEm = em.setThreadLocalEntityManager(emf.createEntityManager());
 		try {
 			rateLimiter.setThreadPriority(RateLimiter.EVENT);
 			// clear blocked time in case it wasn't cleared by the last thread
@@ -609,7 +514,7 @@ public class IRCBot extends CoreHooks {
 				scheduleRegisterActivity(user.getNick());
 			}
 		} finally {
-			em.close();
+			em.closeAndReplace(oldEm);
 			rateLimiter.clearThreadPriority();
 			// clear blocked time so it isn't carried over to the next request under any circumstances
 			rateLimiter.blockedTime();
@@ -636,9 +541,8 @@ public class IRCBot extends CoreHooks {
 			return;
 		}
 
-		IRCBotUser user = fromIRC(event.getUser(), event);
 		try {
-			welcomeIfDonator(user);
+			welcomeIfDonator(ResponseQueue.hideEvent(event));
 		} catch (InterruptedException e) {
 			Thread.currentThread().interrupt();
 		} catch (Exception e) {
@@ -646,7 +550,7 @@ public class IRCBot extends CoreHooks {
 		}
 	}
 	
-	void welcomeIfDonator(IRCBotUser user) throws SQLException, InterruptedException, IOException, UserException {
+	private void welcomeIfDonator(IRCBotUser user) throws SQLException, InterruptedException, IOException, UserException {
 		Integer userid;
 		try {
 			userid = resolver.resolveIRCName(user.getNick());
@@ -694,7 +598,7 @@ public class IRCBot extends CoreHooks {
 				sendResponse(updateResponse, user);
 			}
 			
-			checkVersionInfo(user);
+			sendResponse(checkVersionInfo(user), user);
 		}
 	}
 
@@ -759,22 +663,22 @@ public class IRCBot extends CoreHooks {
 	}
 
 	@Nonnull
-	OsuApiUser getUserOrThrow(IRCBotUser user) throws UserException, SQLException, IOException, InterruptedException {
-		Integer userId = resolver.resolveIRCName(user.getNick());
+	OsuApiUser getUserOrThrow(@IRCName String nick) throws UserException, SQLException, IOException, InterruptedException {
+		Integer userId = resolver.resolveIRCName(nick);
 		
 		if(userId != null) {
-			OsuApiUser apiUser = backend.getUser(userId, 60 * 60 * 1000L);
+			OsuApiUser apiUser = backend.getUser(userId, 60 * 60 * 1000);
 			
 			if(apiUser != null) {
 				String apiUserIrcName = IrcNameResolver.getIrcUserName(apiUser);
-				if (!user.getNick().equals(apiUserIrcName)) {
+				if (!nick.equals(apiUserIrcName)) {
 					// oh no, detected wrong mapping, mismatch between API user and IRC user
 					
 					// sets the mapping according to the API user (who doesnt belong to the current IRC user)
 					resolver.setMapping(apiUserIrcName, apiUser.getUserId());
 					
 					// fix the now known broken mapping with the current irc user
-					apiUser = resolver.redownloadUser(user.getNick());
+					apiUser = resolver.redownloadUser(nick);
 				}
 			}
 
@@ -784,7 +688,7 @@ public class IRCBot extends CoreHooks {
 		}
 		
 		String string = IRCBot.getRandomString(8);
-		log.error("bot user not resolvable " + string + " name: " + user.getNick());
+		log.error("bot user not resolvable " + string + " name: " + nick);
 		
 		// message not in language-files, since we cant possible know language atm
 		throw new UserException("Your name is confusing me. Are you banned? If not, pls check out [https://github.com/Tillerino/Tillerinobot/wiki/How-to-fix-%22confusing-name%22-error this page] on how to resolve it!"

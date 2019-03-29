@@ -318,8 +318,10 @@ public class ThreadLocalAutoCommittingEntityManager implements
 		});
 	}
 
-	public void setThreadLocalEntityManager(EntityManager em) {
+	public EntityManager setThreadLocalEntityManager(EntityManager em) {
+		EntityManager old = entityManager.get();
 		entityManager.set(em);
+		return old;
 	}
 	
 	public boolean isThreadLocalEntityManagerPresent() {
@@ -369,5 +371,10 @@ public class ThreadLocalAutoCommittingEntityManager implements
 			r.run();
 			return null;
 		});
+	}
+
+	public void closeAndReplace(EntityManager em) {
+		close();
+		setThreadLocalEntityManager(em);
 	}
 }
