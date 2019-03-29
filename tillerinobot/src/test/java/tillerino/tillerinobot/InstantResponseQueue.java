@@ -16,18 +16,20 @@ import lombok.extern.slf4j.Slf4j;
 import tillerino.tillerinobot.CommandHandler.Response;
 import tillerino.tillerinobot.data.util.ThreadLocalAutoCommittingEntityManager;
 import tillerino.tillerinobot.rest.BotInfoService.BotInfo;
+import tillerino.tillerinobot.websocket.LiveActivityEndpoint;
 
 @Slf4j
 public class InstantResponseQueue extends ResponseQueue {
 	@Inject
 	public InstantResponseQueue(ExecutorService exec, Pinger pinger, EntityManagerFactory emf,
-			ThreadLocalAutoCommittingEntityManager em, BotInfo botInfo, RateLimiter rateLimiter) {
-		super(exec, pinger, emf, em, botInfo, rateLimiter);
+			ThreadLocalAutoCommittingEntityManager em, BotInfo botInfo, RateLimiter rateLimiter,
+			LiveActivityEndpoint liveActivity) {
+		super(exec, pinger, emf, em, botInfo, rateLimiter, liveActivity);
 	}
 
 	@Override
 	public void queueResponse(Response response, IRCBotUser user) {
-		RequestResult result = new RequestResult(response, () -> () -> { }, 0, user.getNick(), 0);
+		RequestResult result = new RequestResult(response, () -> () -> { }, 0, user.getNick(), 0, user.getEventId());
 		try {
 			handleResponse(response, result);
 		} catch (InterruptedException | IOException e) {

@@ -17,7 +17,6 @@ import org.pircbotx.hooks.types.GenericUserEvent;
 import org.slf4j.MDC;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
-import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.Value;
 import lombok.extern.slf4j.Slf4j;
@@ -37,6 +36,7 @@ import tillerino.tillerinobot.rest.BotInfoService.BotInfo;
 import tillerino.tillerinobot.utils.MdcUtils;
 import tillerino.tillerinobot.utils.MdcUtils.MdcAttributes;
 import tillerino.tillerinobot.utils.MdcUtils.MdcSnapshot;
+import tillerino.tillerinobot.websocket.LiveActivityEndpoint;
 
 @Singleton
 @Slf4j
@@ -53,14 +53,17 @@ public class ResponseQueue implements Runnable {
 		@Getter(onMethod = @__(@IRCName))
 		@IRCName String nick;
 
-		@Getter(AccessLevel.PRIVATE)
-		GenericUserEvent<? extends PircBotX> event;
+		@Getter
+		long timestamp;
 
-		@SuppressFBWarnings("TQ")
-		private IRCBotUser(GenericUserEvent<? extends PircBotX> event) {
+		@Getter
+		long eventId;
+
+		IRCBotUser(@IRCName String nick, long timestamp, long eventId) {
 			super();
-			this.nick = event.getUser().getNick();
-			this.event = event;
+			this.nick = nick;
+			this.timestamp = timestamp;
+			this.eventId = eventId;
 		}
 	}
 
@@ -73,11 +76,25 @@ public class ResponseQueue implements Runnable {
 
 		long startTime;
 
+		@IRCName
+		@Getter(onMethod = @__(@IRCName))
 		String nick;
 
 		long rateLimiterBlockedTime;
 
 		long queueEnterTime = System.currentTimeMillis();
+
+		long eventId;
+
+		RequestResult(Response response, MdcSnapshot mdc, long startTime, @IRCName String nick, long rateLimiterBlockedTime, long eventId) {
+			super();
+			this.response = response;
+			this.mdc = mdc;
+			this.startTime = startTime;
+			this.nick = nick;
+			this.rateLimiterBlockedTime = rateLimiterBlockedTime;
+			this.eventId = eventId;
+		}
 	}
 
 	private final ExecutorService exec;
@@ -94,11 +111,13 @@ public class ResponseQueue implements Runnable {
 
 	private final AtomicReference<CloseableBot> bot = new AtomicReference<>();
 
+	private final LiveActivityEndpoint liveActivity;
+
 	protected final BlockingQueue<RequestResult> queue = new LinkedBlockingQueue<>();
 
 	@Inject
 	public ResponseQueue(@Named("tillerinobot.maintenance") ExecutorService exec, Pinger pinger, EntityManagerFactory emf,
-			ThreadLocalAutoCommittingEntityManager em, BotInfo botInfo, RateLimiter rateLimiter) {
+			ThreadLocalAutoCommittingEntityManager em, BotInfo botInfo, RateLimiter rateLimiter, LiveActivityEndpoint liveActivity) {
 		super();
 		this.exec = exec;
 		this.pinger = pinger;
@@ -106,11 +125,12 @@ public class ResponseQueue implements Runnable {
 		this.em = em;
 		this.botInfo = botInfo;
 		this.rateLimiter = rateLimiter;
+		this.liveActivity = liveActivity;
 	}
 
 	public void queueResponse(Response response, IRCBotUser user) {
-		queue.add(new RequestResult(response, MdcUtils.getSnapshot(), user.getEvent().getTimestamp(), user.getNick(),
-				rateLimiter.blockedTime()));
+		queue.add(new RequestResult(response, MdcUtils.getSnapshot(), user.getTimestamp(), user.getNick(),
+				rateLimiter.blockedTime(), user.getEventId()));
 		botInfo.incrementQueueSize();
 	}
 
@@ -172,6 +192,7 @@ public class ResponseQueue implements Runnable {
 				}
 				throw e;
 			}
+			liveActivity.propagateSentMessage(result.getNick(), result.getEventId());
 			MDC.put(IRCBot.MDC_STATE, "sent");
 			if (success) {
 				MDC.put(ResponseQueue.MDC_DURATION, System.currentTimeMillis() - result.getStartTime() + "");
@@ -202,6 +223,7 @@ public class ResponseQueue implements Runnable {
 			}
 			throw e;
 		}
+		liveActivity.propagateSentMessage(result.getNick(), result.getEventId());
 		MDC.put(IRCBot.MDC_STATE, "sent");
 		log.debug("sent action: " + msg);
 	}
@@ -209,16 +231,26 @@ public class ResponseQueue implements Runnable {
 	public void run() {
 		for (;;) {
 			try {
-				RequestResult response = queue.take();
-				botInfo.decrementQueueSize();
-				try (MdcAttributes mdc = response.getMdc().apply()) {
-					handleResponse(response.getResponse(), response);
-				}
+				loop();
 			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
 				return;
-			} catch (IOException | RuntimeException e) {
-				log.error("Exception while handling response", e);
+			} 
+		}
+	}
+
+	/**
+	 * Executes one loop in {@link #run()}. Extracted and visible for tests so we don't need an external test.
+	 */
+	void loop() throws InterruptedException {
+		try {
+			RequestResult response = queue.take();
+			botInfo.decrementQueueSize();
+			try (MdcAttributes mdc = response.getMdc().apply()) {
+				handleResponse(response.getResponse(), response);
 			}
+		} catch (IOException | RuntimeException e) {
+			log.error("Exception while handling response", e);
 		}
 	}
 
@@ -232,8 +264,9 @@ public class ResponseQueue implements Runnable {
 		}
 	}
 
-	public static IRCBotUser hideEvent(GenericUserEvent<? extends PircBotX> event) {
-		return new IRCBotUser(event);
+	@SuppressFBWarnings("TQ")
+	public static IRCBotUser hideEvent(GenericUserEvent<? extends PircBotX> event, long eventId) {
+		return new IRCBotUser(event.getUser().getNick(), event.getTimestamp(), eventId);
 	}
 
 	public void setBot(CloseableBot bot) {

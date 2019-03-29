@@ -106,7 +106,7 @@ public class IRCBotTest extends AbstractDatabaseTest {
 	 * Contains the messages and actions sent by the bot. At the end of each
 	 * test, it must be empty or the test fails.
 	 */
-	InstantResponseQueue queue = new InstantResponseQueue(exec, null, emf, em, null, rateLimiter);
+	InstantResponseQueue queue;
 
 	@CheckForNull
 	protected LoadingCache<String, IRCBot.TimingSemaphore> perUserLock;
@@ -120,6 +120,7 @@ public class IRCBotTest extends AbstractDatabaseTest {
 		recommendationsManager = spy(new RecommendationsManager(backend, recommendationsRepo, em, new RecommendationRequestParser(backend)));
 		when(pircBotX.getConfiguration()).thenReturn(config);
 		when(config.getListenerManager()).thenReturn(mock(ListenerManager.class));
+		queue = new InstantResponseQueue(exec, null, emf, em, null, rateLimiter, liveActivity);
 	}
 
 	@After
@@ -387,7 +388,7 @@ public class IRCBotTest extends AbstractDatabaseTest {
 		bot.sendResponse((AsyncTask) () -> {
 			assertNotSame(targetEntityManager, em.getTargetEntityManager());
 			executed.set(true);
-		}, queue.hideEvent(join("whoever")));
+		}, queue.hideEvent(join("whoever"), 1));
 		assertTrue(executed.get());
 	}
 

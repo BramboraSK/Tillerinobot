@@ -56,8 +56,8 @@ public class WithHandler implements CommandHandler {
 		if (beatmap.getMods() == 0) {
 			throw new UserException(lang.noInformationForMods());
 		}
-		
-		live.propagateMessageDetails(IRCBot.getEventId(), "!" + originalMessage);
+
+		IRCBot.getEventId().ifPresent(eventId -> live.propagateMessageDetails(eventId, "!" + originalMessage));
 
 		return new Message(beatmap.formInfoMessage(false, null,
 				userData.getHearts(), null, null, null)).thenRun(

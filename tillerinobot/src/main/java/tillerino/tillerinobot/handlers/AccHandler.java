@@ -32,10 +32,10 @@ public class AccHandler implements CommandHandler {
 	static Pattern superExtended = Pattern.compile("(\\d+)x100\\s+(?:(\\d+)x50\\s+)?(\\d+)x\\s+(\\d+)m", Pattern.CASE_INSENSITIVE);
 
 	@Override
-	public Response handle(String message, OsuApiUser apiUser,
+	public Response handle(String originalMessage, OsuApiUser apiUser,
 			UserData userData) throws UserException,
 			IOException, SQLException, InterruptedException {
-		if (!message.toLowerCase().startsWith("acc")) {
+		if (!originalMessage.toLowerCase().startsWith("acc")) {
 			return null;
 		}
 		
@@ -51,9 +51,9 @@ public class AccHandler implements CommandHandler {
 			throw new RareUserException(lang.excuseForError());
 		}
 
-		live.propagateMessageDetails(IRCBot.getEventId(), "!" + message);
+		IRCBot.getEventId().ifPresent(eventId -> live.propagateMessageDetails(eventId, "!" + originalMessage));
 
-		message = message.substring(3).trim().replace(',', '.');
+		String message = originalMessage.substring(3).trim().replace(',', '.');
 		Matcher extendedMatcher = extended.matcher(message);
 		Matcher superExtendedMatcher = superExtended.matcher(message);
 		if(extendedMatcher.matches()) {

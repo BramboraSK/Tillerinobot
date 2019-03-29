@@ -6,6 +6,7 @@ import java.net.SocketTimeoutException;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.OptionalLong;
 import java.util.Random;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -16,7 +17,6 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
-import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import javax.inject.Inject;
@@ -148,7 +148,7 @@ public class IRCBot extends CoreHooks {
 		rateLimiter.setThreadPriority(RateLimiter.REQUEST);
 		
 		if (event.getChannel() == null || event.getUser().getNick().equals("Tillerino")) {
-			processPrivateAction(ResponseQueue.hideEvent(event), event.getMessage());
+			processPrivateAction(ResponseQueue.hideEvent(event, getEventId().orElseThrow(IllegalStateException::new)), event.getMessage());
 		}
 	}
 	
@@ -253,7 +253,7 @@ public class IRCBot extends CoreHooks {
 		MDC.put(MDC_STATE, "action");
 		log.debug("action: " + message);
 		botInfo.setLastReceivedMessage(System.currentTimeMillis());
-		liveActivity.propagateReceivedMessage(user.getNick(), getEventId());
+		liveActivity.propagateReceivedMessage(user.getNick(), user.getEventId());
 		
 		TimingSemaphore semaphore = perUserLock.getUnchecked(user.getNick());
 		if(!semaphore.tryAcquire()) {
@@ -276,12 +276,12 @@ public class IRCBot extends CoreHooks {
 		}
 	}
 
-	public static @CheckForNull Long getEventId() {
+	public static OptionalLong getEventId() {
 		String asString = MDC.get(MDC_EVENT);
 		if (asString == null) {
-			return null;
+			return OptionalLong.empty();
 		}
-		return Long.parseLong(asString);
+		return OptionalLong.of(Long.parseLong(asString));
 	}
 
 	private Response handleException(IRCBotUser user, Throwable e, Language lang) {
@@ -364,7 +364,7 @@ public class IRCBot extends CoreHooks {
 			return;
 		rateLimiter.setThreadPriority(RateLimiter.REQUEST);
 		
-		processPrivateMessage(ResponseQueue.hideEvent(event), event.getMessage());
+		processPrivateMessage(ResponseQueue.hideEvent(event, getEventId().orElseThrow(IllegalStateException::new)), event.getMessage());
 	}
 
 	@Override
@@ -411,7 +411,7 @@ public class IRCBot extends CoreHooks {
 		MDC.put(MDC_STATE, "msg");
 		log.debug("received: " + originalMessage);
 		botInfo.setLastReceivedMessage(System.currentTimeMillis());
-		liveActivity.propagateReceivedMessage(user.getNick(), getEventId());
+		liveActivity.propagateReceivedMessage(user.getNick(), user.getEventId());
 
 		TimingSemaphore semaphore = perUserLock.getUnchecked(user.getNick());
 		if(!semaphore.tryAcquire()) {
@@ -542,7 +542,7 @@ public class IRCBot extends CoreHooks {
 		}
 
 		try {
-			welcomeIfDonator(ResponseQueue.hideEvent(event));
+			welcomeIfDonator(ResponseQueue.hideEvent(event, getEventId().orElseThrow(IllegalStateException::new)));
 		} catch (InterruptedException e) {
 			Thread.currentThread().interrupt();
 		} catch (Exception e) {

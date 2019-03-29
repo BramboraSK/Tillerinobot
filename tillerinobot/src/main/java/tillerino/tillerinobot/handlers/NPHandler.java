@@ -48,8 +48,8 @@ public class NPHandler implements CommandHandler {
 
 		if (pair == null)
 			return null;
-		
-		live.propagateMessageDetails(IRCBot.getEventId(), "/np");
+
+		IRCBot.getEventId().ifPresent(eventId -> live.propagateMessageDetails(eventId, "/np"));
 
 		BeatmapMeta beatmap = backend.loadBeatmap(pair.getBeatmap(),
 				pair.getMods(), lang);

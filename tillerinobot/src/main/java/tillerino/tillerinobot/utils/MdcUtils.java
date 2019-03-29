@@ -1,7 +1,9 @@
 package tillerino.tillerinobot.utils;
 
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 
 import org.slf4j.MDC;
 
@@ -30,7 +32,7 @@ public class MdcUtils {
 	}
 
 	public static MdcSnapshot getSnapshot() {
-		Map<String, String> snapshot = MDC.getCopyOfContextMap();
+		Map<String, String> snapshot = Optional.ofNullable(MDC.getCopyOfContextMap()).orElseGet(Collections::emptyMap);
 		return () -> {
 			Map<String, String> overwritten = new LinkedHashMap<>();
 			snapshot.forEach((k, v) -> {
