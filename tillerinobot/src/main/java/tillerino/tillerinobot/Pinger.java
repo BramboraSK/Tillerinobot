@@ -7,6 +7,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.inject.Inject;
+import javax.inject.Singleton;
 
 import org.pircbotx.Utils;
 import org.pircbotx.hooks.events.UnknownEvent;
@@ -17,6 +18,7 @@ import tillerino.tillerinobot.BotRunnerImpl.CloseableBot;
 import tillerino.tillerinobot.rest.BotInfoService.BotInfo;
 
 @Slf4j
+@Singleton
 public class Pinger {
 	volatile String pingMessage = null;
 	volatile CountDownLatch pingLatch = null;

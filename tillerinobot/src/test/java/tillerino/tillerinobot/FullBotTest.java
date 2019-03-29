@@ -42,6 +42,7 @@ import com.google.inject.name.Names;
 
 import lombok.extern.slf4j.Slf4j;
 import tillerino.tillerinobot.AbstractDatabaseTest.CreateInMemoryDatabaseModule;
+import tillerino.tillerinobot.data.util.RepositoryModule;
 import tillerino.tillerinobot.rest.BotInfoService.BotInfo;
 import tillerino.tillerinobot.testutil.ExecutorServiceRule;
 import tillerino.tillerinobot.websocket.JettyWebsocketServerResource;
@@ -139,6 +140,7 @@ public class FullBotTest {
 		@Override
 		protected void configure() {
 			install(new CreateInMemoryDatabaseModule());
+			install(new RepositoryModule());
 			install(new TillerinobotConfigurationModule());
 
 			bind(String.class).annotatedWith(Names.named("tillerinobot.irc.server")).toInstance("localhost");
